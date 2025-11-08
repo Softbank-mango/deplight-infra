@@ -286,3 +286,28 @@ jobs:
             echo "  Got: ${CONTAINER_IMAGE}"
             exit 1
           fi
+
+      - name: Save successful deployment info
+        if: success()
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          mkdir -p deployment-state
+          echo "${IMAGE_TAG}" > deployment-state/last-successful-image-tag.txt
+          echo "${ENVIRONMENT}" > deployment-state/environment.txt
+          echo "${{ github.sha }}" > deployment-state/commit-sha.txt
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > deployment-state/timestamp.txt
+
+          echo "📝 Saved successful deployment state:"
+          echo "  Image Tag: ${IMAGE_TAG}"
+          echo "  Environment: ${ENVIRONMENT}"
+          echo "  Commit: ${{ github.sha }}"
+
+      - name: Upload deployment state
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-successful-deployment-${{ github.event.inputs.environment || 'dev' }}
+          path: deployment-state/
+          retention-days: 30
