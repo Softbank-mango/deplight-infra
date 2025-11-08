@@ -1,0 +1,334 @@
+name: Auto Rollback on Deployment Failure
+
+on:
+  workflow_run:
+    workflows: ["Deploy Service"]
+    types:
+      - completed
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 513348493870.dkr.ecr.ap-northeast-2.amazonaws.com
+  ECR_REPOSITORY: delightful-deploy
+  CLUSTER_NAME: delightful-deploy-cluster
+  SERVICE_NAME: delightful-deploy-service
+  TASK_FAMILY: delightful-deploy
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+jobs:
+  check-deployment-failure:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    outputs:
+      should_rollback: ${{ steps.check.outputs.should_rollback }}
+      environment: ${{ steps.check.outputs.environment }}
+      failed_image_tag: ${{ steps.check.outputs.failed_image_tag }}
+      rollback_reason: ${{ steps.check.outputs.rollback_reason }}
+
+    steps:
+      - name: Check deployment failure
+        id: check
+        run: |
+          echo "🚨 Deployment workflow failed"
+          echo "  Workflow: ${{ github.event.workflow_run.name }}"
+          echo "  Run ID: ${{ github.event.workflow_run.id }}"
+          echo "  Conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "  Triggered by: ${{ github.event.workflow_run.triggering_actor.login }}"
+
+          # Extract environment from workflow inputs (if available)
+          ENVIRONMENT="dev"  # Default
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+
+          # Determine if we should rollback
+          # Skip rollback if this is already a rollback workflow
+          if [[ "${{ github.event.workflow_run.name }}" == *"Rollback"* ]]; then
+            echo "⚠️ This was a rollback workflow - not triggering auto-rollback to prevent loops"
+            echo "should_rollback=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "should_rollback=true" >> $GITHUB_OUTPUT
+          echo "rollback_reason=Deployment workflow failed with conclusion: ${{ github.event.workflow_run.conclusion }}" >> $GITHUB_OUTPUT
+
+  get-last-successful-deployment:
+    needs: check-deployment-failure
+    if: needs.check-deployment-failure.outputs.should_rollback == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      last_image_tag: ${{ steps.get-tag.outputs.last_image_tag }}
+      last_commit: ${{ steps.get-tag.outputs.last_commit }}
+      has_previous_deployment: ${{ steps.get-tag.outputs.has_previous_deployment }}
+
+    steps:
+      - name: Get workflow runs
+        id: get-runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workflowRuns = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy.yml',
+              status: 'success',
+              per_page: 5
+            });
+
+            console.log(`Found ${workflowRuns.data.workflow_runs.length} successful deployments`);
+
+            if (workflowRuns.data.workflow_runs.length === 0) {
+              console.log('⚠️ No successful deployments found');
+              return { found: false };
+            }
+
+            const lastSuccessful = workflowRuns.data.workflow_runs[0];
+            console.log(`Last successful deployment: Run #${lastSuccessful.run_number} (${lastSuccessful.id})`);
+
+            return {
+              found: true,
+              run_id: lastSuccessful.id,
+              run_number: lastSuccessful.run_number,
+              commit_sha: lastSuccessful.head_sha
+            };
+
+      - name: Download last successful deployment artifact
+        id: download
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: last-successful-deployment-${{ needs.check-deployment-failure.outputs.environment }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ fromJSON(steps.get-runs.outputs.result).run_id }}
+
+      - name: Get last successful image tag
+        id: get-tag
+        run: |
+          if [ -f "last-successful-image-tag.txt" ]; then
+            LAST_TAG=$(cat last-successful-image-tag.txt)
+            LAST_COMMIT=$(cat commit-sha.txt 2>/dev/null || echo "unknown")
+            TIMESTAMP=$(cat timestamp.txt 2>/dev/null || echo "unknown")
+
+            echo "✅ Found last successful deployment:"
+            echo "  Image Tag: ${LAST_TAG}"
+            echo "  Commit: ${LAST_COMMIT}"
+            echo "  Timestamp: ${TIMESTAMP}"
+
+            echo "last_image_tag=${LAST_TAG}" >> $GITHUB_OUTPUT
+            echo "last_commit=${LAST_COMMIT}" >> $GITHUB_OUTPUT
+            echo "has_previous_deployment=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ No previous successful deployment artifact found"
+            echo "has_previous_deployment=false" >> $GITHUB_OUTPUT
+
+            # Fallback: Try to get last successful image from ECS
+            echo "Attempting to get current ECS task definition as fallback..."
+          fi
+
+  auto-rollback:
+    needs: [check-deployment-failure, get-last-successful-deployment]
+    if: needs.get-last-successful-deployment.outputs.has_previous_deployment == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.check-deployment-failure.outputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: roll-back
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get current and previous Task Definition revisions
+        id: get-revisions
+        env:
+          LAST_IMAGE_TAG: ${{ needs.get-last-successful-deployment.outputs.last_image_tag }}
+        run: |
+          echo "🔍 Finding Task Definition revisions..."
+
+          # Get current task definition
+          CURRENT_TASK_DEF=$(aws ecs describe-services \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          CURRENT_REVISION=$(echo "$CURRENT_TASK_DEF" | grep -oP ':\K\d+$')
+          echo "Current revision: $CURRENT_REVISION"
+
+          # Find the revision with the last successful image tag
+          echo "Looking for revision with image tag: ${LAST_IMAGE_TAG}..."
+
+          # List recent task definitions
+          TASK_DEFS=$(aws ecs list-task-definitions \
+            --family-prefix ${{ env.TASK_FAMILY }} \
+            --sort DESC \
+            --max-items 20 \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinitionArns[]' \
+            --output text)
+
+          TARGET_REVISION=""
+          for task_def_arn in $TASK_DEFS; do
+            IMAGE=$(aws ecs describe-task-definition \
+              --task-definition "$task_def_arn" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'taskDefinition.containerDefinitions[0].image' \
+              --output text)
+
+            if echo "$IMAGE" | grep -q ":${LAST_IMAGE_TAG}"; then
+              TARGET_REVISION=$(echo "$task_def_arn" | grep -oP ':\K\d+$')
+              echo "✅ Found matching revision: $TARGET_REVISION"
+              echo "   Image: $IMAGE"
+              break
+            fi
+          done
+
+          if [ -z "$TARGET_REVISION" ]; then
+            echo "❌ Could not find Task Definition with image tag ${LAST_IMAGE_TAG}"
+            echo "Attempting rollback to previous revision: $((CURRENT_REVISION - 1))"
+            TARGET_REVISION=$((CURRENT_REVISION - 1))
+          fi
+
+          echo "current_revision=${CURRENT_REVISION}" >> $GITHUB_OUTPUT
+          echo "target_revision=${TARGET_REVISION}" >> $GITHUB_OUTPUT
+
+      - name: Perform automatic rollback
+        id: rollback
+        env:
+          TARGET_REVISION: ${{ steps.get-revisions.outputs.target_revision }}
+          CURRENT_REVISION: ${{ steps.get-revisions.outputs.current_revision }}
+        run: |
+          echo "🔄 Performing automatic rollback..."
+          echo "  From revision: ${CURRENT_REVISION}"
+          echo "  To revision: ${TARGET_REVISION}"
+
+          # Prevent rolling back to same or newer revision
+          if [ "$TARGET_REVISION" -ge "$CURRENT_REVISION" ]; then
+            echo "⚠️ Target revision ($TARGET_REVISION) is not older than current ($CURRENT_REVISION)"
+            echo "Skipping rollback to prevent issues"
+            exit 1
+          fi
+
+          # Update ECS service
+          aws ecs update-service \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --service ${{ env.SERVICE_NAME }} \
+            --task-definition ${{ env.TASK_FAMILY }}:${TARGET_REVISION} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "✅ ECS service update initiated"
+
+      - name: Wait for service stability
+        run: |
+          echo "⏳ Waiting for ECS service to stabilize..."
+
+          aws ecs wait services-stable \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }} || {
+            echo "⚠️ Service did not stabilize within timeout"
+            exit 0
+          }
+
+          echo "✅ Service is stable"
+
+      - name: Verify rollback
+        id: verify
+        env:
+          TARGET_REVISION: ${{ steps.get-revisions.outputs.target_revision }}
+        run: |
+          echo "🔍 Verifying rollback..."
+
+          CURRENT_TASK_DEF=$(aws ecs describe-services \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          ACTUAL_REVISION=$(echo "$CURRENT_TASK_DEF" | grep -oP ':\K\d+$')
+
+          if [ "$ACTUAL_REVISION" == "$TARGET_REVISION" ]; then
+            echo "✅ Rollback verified successfully"
+            echo "   Current revision: $ACTUAL_REVISION"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Rollback verification failed"
+            echo "   Expected: $TARGET_REVISION"
+            echo "   Actual: $ACTUAL_REVISION"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Create rollback summary
+        if: always()
+        env:
+          LAST_IMAGE_TAG: ${{ needs.get-last-successful-deployment.outputs.last_image_tag }}
+          TARGET_REVISION: ${{ steps.get-revisions.outputs.target_revision }}
+          CURRENT_REVISION: ${{ steps.get-revisions.outputs.current_revision }}
+          VERIFY_SUCCESS: ${{ steps.verify.outputs.success }}
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🔄 Automatic Rollback Executed
+
+          ### Trigger
+          - **Reason**: Deployment workflow failed
+          - **Failed Workflow**: ${{ github.event.workflow_run.name }}
+          - **Failed Run**: [#${{ github.event.workflow_run.run_number }}](${{ github.event.workflow_run.html_url }})
+
+          ### Rollback Details
+          - **Environment**: ${{ needs.check-deployment-failure.outputs.environment }}
+          - **Rollback Method**: ECS Task Definition
+          - **From Revision**: ${CURRENT_REVISION}
+          - **To Revision**: ${TARGET_REVISION}
+          - **Image Tag**: \`${LAST_IMAGE_TAG}\`
+          - **Status**: ${VERIFY_SUCCESS:-"in_progress"}
+
+          ### Next Steps
+          1. ✅ Verify the service is healthy in [AWS Console](https://console.aws.amazon.com/ecs/home?region=${{ env.AWS_REGION }}#/clusters/${{ env.CLUSTER_NAME }}/services/${{ env.SERVICE_NAME }})
+          2. 📊 Check [CloudWatch Logs](https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/\$252Faws\$252Fecs\$252F${{ env.TASK_FAMILY }})
+          3. 🔍 Investigate the original deployment failure
+          4. 🐛 Fix the issue before re-deploying
+
+          ---
+          ⚠️ **Important**: This was an automatic rollback. Please investigate and fix the root cause before attempting to deploy again.
+          EOF
+
+  notify-failure-no-rollback:
+    needs: [check-deployment-failure, get-last-successful-deployment]
+    if: |
+      needs.check-deployment-failure.outputs.should_rollback == 'true' &&
+      needs.get-last-successful-deployment.outputs.has_previous_deployment != 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create notification
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ⚠️ Deployment Failed - No Automatic Rollback
+
+          ### Reason
+          No previous successful deployment found to rollback to.
+
+          ### Failed Deployment
+          - **Workflow**: ${{ github.event.workflow_run.name }}
+          - **Run**: [#${{ github.event.workflow_run.run_number }}](${{ github.event.workflow_run.html_url }})
+          - **Environment**: ${{ needs.check-deployment-failure.outputs.environment }}
+
+          ### Manual Action Required
+          1. Check the [failed workflow logs](${{ github.event.workflow_run.html_url }})
+          2. Fix the deployment issue
+          3. If needed, perform manual rollback using the rollback workflow
+
+          ---
+          💡 **Tip**: Future deployments will enable automatic rollback once a successful deployment is recorded.
+          EOF

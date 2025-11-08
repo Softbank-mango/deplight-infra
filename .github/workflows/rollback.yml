@@ -1,0 +1,314 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (dev/prod)"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image_tag:
+        description: "Image tag to rollback to (commit SHA, e.g., abc123d)"
+        required: true
+        type: string
+      rollback_type:
+        description: "Rollback method"
+        required: true
+        type: choice
+        options:
+          - terraform
+          - codedeploy
+        default: terraform
+      confirm:
+        description: "Type 'ROLLBACK' to confirm (case-sensitive)"
+        required: true
+        type: string
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 513348493870.dkr.ecr.ap-northeast-2.amazonaws.com
+  ECR_REPOSITORY: delightful-deploy
+  TF_DIR: infrastructure
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      confirmed: ${{ steps.check.outputs.confirmed }}
+
+    steps:
+      - name: Validate confirmation
+        id: check
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "ROLLBACK" ]; then
+            echo "❌ ERROR: Confirmation string does not match. You must type 'ROLLBACK' exactly."
+            exit 1
+          fi
+          echo "confirmed=true" >> $GITHUB_OUTPUT
+          echo "✅ Rollback confirmed"
+
+      - name: Validate image tag format
+        run: |
+          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          if [[ ! "$IMAGE_TAG" =~ ^[a-f0-9]{7,40}$ ]]; then
+            echo "⚠️  WARNING: Image tag does not look like a commit SHA"
+            echo "  Tag: $IMAGE_TAG"
+            echo "  Expected format: 7-40 character hex string (commit SHA)"
+          fi
+
+  terraform-rollback:
+    needs: validate
+    if: github.event.inputs.rollback_type == 'terraform'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: roll-back
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify image exists in ECR
+        run: |
+          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          echo "Checking if image exists: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=${IMAGE_TAG} \
+            --region ${{ env.AWS_REGION }} \
+            >/dev/null 2>&1 || {
+              echo "❌ ERROR: Image tag ${IMAGE_TAG} not found in ECR repository ${{ env.ECR_REPOSITORY }}"
+              echo "Please verify the image tag and try again."
+              exit 1
+            }
+
+          echo "✅ Image found in ECR"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -reconfigure
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan (Rollback)
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          echo "================================================"
+          echo "🔄 ROLLBACK PLAN"
+          echo "================================================"
+          echo "  Environment: ${TARGET_ENV}"
+          echo "  Rollback to Image Tag: ${IMAGE_TAG}"
+          echo "  Full Image URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "  Workflow run: ${{ github.run_id }}"
+          echo "================================================"
+
+          terraform plan \
+            -var-file=environments/${TARGET_ENV}.tfvars \
+            -var="container_image=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" \
+            -out=rollback.tfplan
+
+      - name: Terraform Apply (Rollback)
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          echo "================================================"
+          echo "🔄 APPLYING ROLLBACK"
+          echo "================================================"
+          terraform apply -auto-approve rollback.tfplan
+          echo "✅ Rollback applied successfully"
+
+      - name: Display Rollback Status
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "================================================"
+          echo "📊 ROLLBACK DEPLOYMENT SUMMARY"
+          echo "================================================"
+          terraform output -json | jq -r '
+            "ECS Cluster: \(.ecs_cluster_name.value // "N/A")",
+            "ECS Service: \(.ecs_service_name.value // "N/A")",
+            "Task Definition: \(.ecs_task_definition.value // "N/A")",
+            "Container Image: \(.container_image.value // "N/A")",
+            "ALB DNS: \(.alb_dns_name.value // "N/A")"
+          ' || echo "Unable to fetch outputs"
+          echo "================================================"
+
+      - name: Verify Rollback
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          echo "Verifying rollback..."
+          CLUSTER_NAME="${{ env.ECR_REPOSITORY }}-cluster"
+          SERVICE_NAME="${{ env.ECR_REPOSITORY }}-service"
+
+          sleep 10  # Wait for ECS to update
+
+          # Get the latest task definition ARN
+          TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster ${CLUSTER_NAME} \
+            --services ${SERVICE_NAME} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].taskDefinition' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$TASK_DEF_ARN" ]; then
+            echo "⚠️  WARNING: Unable to verify rollback - service not found or not accessible"
+            exit 0
+          fi
+
+          echo "Current task definition: ${TASK_DEF_ARN}"
+
+          # Get the container image from the task definition
+          CONTAINER_IMAGE=$(aws ecs describe-task-definition \
+            --task-definition ${TASK_DEF_ARN} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.containerDefinitions[0].image' \
+            --output text 2>/dev/null || echo "")
+
+          echo "Container image in task definition: ${CONTAINER_IMAGE}"
+
+          # Verify the image tag matches
+          EXPECTED_IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          if [[ "${CONTAINER_IMAGE}" == "${EXPECTED_IMAGE}" ]]; then
+            echo "✅ SUCCESS: Rollback verified! ECS is now running image tag: ${IMAGE_TAG}"
+          else
+            echo "⚠️  WARNING: Image mismatch or verification failed"
+            echo "  Expected: ${EXPECTED_IMAGE}"
+            echo "  Got: ${CONTAINER_IMAGE}"
+          fi
+
+      - name: Create rollback summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🔄 Rollback Completed
+
+          ### Details
+          - **Environment**: ${{ github.event.inputs.environment }}
+          - **Rollback Method**: Terraform
+          - **Image Tag**: \`${{ github.event.inputs.image_tag }}\`
+          - **Triggered by**: @${{ github.actor }}
+          - **Workflow Run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ### Next Steps
+          1. Verify the deployment in [AWS Console](https://console.aws.amazon.com/ecs)
+          2. Check CloudWatch metrics and logs
+          3. Run smoke tests if applicable
+
+          ⚠️ **Important**: Monitor the deployment closely for the next 15-30 minutes.
+          EOF
+
+  codedeploy-rollback:
+    needs: validate
+    if: github.event.inputs.rollback_type == 'codedeploy'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: roll-back
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Find and stop current deployment
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          APP_NAME="deplight-${ENVIRONMENT}-app"
+          DEPLOYMENT_GROUP="${ENVIRONMENT}-deployment-group"
+
+          echo "================================================"
+          echo "🔄 CodeDeploy Rollback"
+          echo "================================================"
+          echo "  Application: ${APP_NAME}"
+          echo "  Deployment Group: ${DEPLOYMENT_GROUP}"
+          echo "================================================"
+
+          # Find latest deployment
+          DEPLOYMENT_ID=$(aws deploy list-deployments \
+            --application-name "${APP_NAME}" \
+            --deployment-group-name "${DEPLOYMENT_GROUP}" \
+            --query 'deployments[0]' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$DEPLOYMENT_ID" ] || [ "$DEPLOYMENT_ID" == "None" ]; then
+            echo "❌ ERROR: No deployments found for ${APP_NAME} / ${DEPLOYMENT_GROUP}"
+            exit 1
+          fi
+
+          echo "Latest deployment ID: ${DEPLOYMENT_ID}"
+
+          # Get deployment status
+          DEPLOYMENT_STATUS=$(aws deploy get-deployment \
+            --deployment-id "${DEPLOYMENT_ID}" \
+            --query 'deploymentInfo.status' \
+            --output text)
+
+          echo "Current deployment status: ${DEPLOYMENT_STATUS}"
+
+          # Stop deployment if in progress
+          if [[ "$DEPLOYMENT_STATUS" == "InProgress" || "$DEPLOYMENT_STATUS" == "Queued" || "$DEPLOYMENT_STATUS" == "Created" ]]; then
+            echo "Stopping deployment to trigger automatic rollback..."
+
+            aws deploy stop-deployment \
+              --deployment-id "${DEPLOYMENT_ID}" \
+              --auto-rollback-enabled
+
+            echo "✅ Deployment stopped. Automatic rollback initiated."
+            echo "deployment_id=${DEPLOYMENT_ID}" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  WARNING: Deployment is in '${DEPLOYMENT_STATUS}' state"
+            echo "For completed deployments, use Terraform rollback instead"
+            exit 1
+          fi
+
+      - name: Create rollback summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🔄 CodeDeploy Rollback Initiated
+
+          ### Details
+          - **Environment**: ${{ github.event.inputs.environment }}
+          - **Rollback Method**: CodeDeploy Auto-Rollback
+          - **Triggered by**: @${{ github.actor }}
+
+          ### Next Steps
+          1. Monitor the rollback in [AWS CodeDeploy Console](https://console.aws.amazon.com/codesuite/codedeploy/applications)
+          2. Check deployment events and logs
+          3. Verify the service returns to stable state
+
+          ⚠️ **Note**: This stops the current deployment and triggers CodeDeploy's automatic rollback feature.
+          EOF
