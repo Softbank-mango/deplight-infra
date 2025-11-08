@@ -42,3 +42,9 @@ variable "analyzer_bucket" {
   description = "S3 bucket where analyzer artifacts are stored."
   default     = "delightful-deploy-artifacts-513348493870"
 }
+
+variable "state_bucket" {
+  type        = string
+  description = "S3 bucket that stores Terraform remote state."
+  default     = "deplight-platform-tf-state"
+}

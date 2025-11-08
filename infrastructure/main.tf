@@ -92,12 +92,13 @@ module "codedeploy" {
 module "github_oidc" {
   source = "./modules/iam-github-oidc"
 
-  github_org       = var.github_org
-  github_repo      = var.github_repo
-  role_name        = var.github_oidc_role_name
-  allowed_subjects = var.github_allowed_subjects
+  github_org          = var.github_org
+  github_repo         = var.github_repo
+  role_name           = var.github_oidc_role_name
+  allowed_subjects    = var.github_allowed_subjects
   analyzer_lambda_arn = var.analyzer_lambda_arn
   analyzer_bucket     = var.analyzer_bucket
+  state_bucket        = var.state_bucket
 }
 
 module "observability" {

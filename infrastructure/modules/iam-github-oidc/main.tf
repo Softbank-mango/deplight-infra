@@ -121,6 +121,28 @@ data "aws_iam_policy_document" "base_permissions" {
       "arn:aws:s3:::${var.analyzer_bucket}/*"
     ]
   }
+
+  statement {
+    sid = "TerraformStateAccess"
+    actions = [
+      "s3:ListBucket"
+    ]
+    resources = [
+      "arn:aws:s3:::${var.state_bucket}"
+    ]
+  }
+
+  statement {
+    sid = "TerraformStateObjects"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject"
+    ]
+    resources = [
+      "arn:aws:s3:::${var.state_bucket}/*"
+    ]
+  }
 }
 
 resource "aws_iam_policy" "base" {
