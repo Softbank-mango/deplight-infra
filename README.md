@@ -16,22 +16,24 @@ This guide provides comprehensive instructions for rolling back deployments in t
 
 The deplight-platform supports multiple rollback strategies:
 
-1. **ECS Task Definition Rollback** ⭐ **Most Reliable**: Rollback to a specific Task Definition revision
-2. **Terraform Rollback**: Redeploy a previous image tag by re-running Terraform
-3. **CodeDeploy Auto-Rollback**: Automatic rollback on deployment failure
-4. **Manual CodeDeploy Rollback**: Stop current deployment to trigger rollback
+1. **🤖 Automatic Rollback** 🆕 **Self-Healing**: Deploy fails → Auto-rollback to last successful version
+2. **ECS Task Definition Rollback** ⭐ **Most Reliable**: Rollback to a specific Task Definition revision
+3. **Terraform Rollback**: Redeploy a previous image tag by re-running Terraform
+4. **CodeDeploy Auto-Rollback**: Automatic rollback on deployment failure
+5. **Manual CodeDeploy Rollback**: Stop current deployment to trigger rollback
 
 ## Rollback Methods
 
 ### Method Comparison
 
-| Method | Use Case | Speed | Complexity | Automated | Reliability |
-|--------|----------|-------|------------|-----------|-------------|
-| **ECS Task Definition** ⭐ | Most reliable, captures full task config | ~3-5 min | Low | Partial | ⭐⭐⭐⭐⭐ |
-| **GitHub Actions Workflow** | Recommended for all rollbacks | ~5-10 min | Low | Yes | ⭐⭐⭐⭐ |
-| **Terraform Script** | Manual rollback, local execution | ~5-10 min | Medium | Partial | ⭐⭐⭐⭐ |
-| **CodeDeploy Auto** | Failed deployments | ~2-5 min | Low | Yes | ⭐⭐⭐ |
-| **CodeDeploy Manual** | Stop in-progress deployment | ~2-5 min | Low | Partial | ⭐⭐⭐ |
+| Method | Use Case | Speed | Complexity | Automated | Reliability | Manual Intervention |
+|--------|----------|-------|------------|-----------|-------------|---------------------|
+| **🤖 Automatic Rollback** 🆕 | Deploy fails → instant rollback | ~3-5 min | Low | ✅ **Full** | ⭐⭐⭐⭐⭐ | **None** |
+| **ECS Task Definition** ⭐ | Most reliable, captures full task config | ~3-5 min | Low | Partial | ⭐⭐⭐⭐⭐ | Select revision |
+| **GitHub Actions Workflow** | Recommended for manual rollbacks | ~5-10 min | Low | Yes | ⭐⭐⭐⭐ | Trigger workflow |
+| **Terraform Script** | Manual rollback, local execution | ~5-10 min | Medium | Partial | ⭐⭐⭐⭐ | Run script locally |
+| **CodeDeploy Auto** | Failed deployments | ~2-5 min | Low | Yes | ⭐⭐⭐ | Pre-configured |
+| **CodeDeploy Manual** | Stop in-progress deployment | ~2-5 min | Low | Partial | ⭐⭐⭐ | Stop deployment |
 
 ## Prerequisites
 
@@ -74,7 +76,53 @@ aws ecs describe-services \
 
 ## Quick Start
 
-### Option 1: GitHub Actions Workflow (Recommended)
+### Option 0: 🤖 Automatic Rollback (Zero Touch) 🆕
+
+**The Best Option**: No action needed! Rollback happens automatically on deployment failure.
+
+**How it works:**
+```
+1. Deploy workflow fails (Terraform apply error, ECS update fails, etc.)
+   ↓
+2. Auto-rollback workflow triggers automatically (workflow_run event)
+   ↓
+3. Fetches last successful deployment's image tag from artifacts
+   ↓
+4. Finds matching ECS Task Definition revision
+   ↓
+5. Rolls back ECS service to that revision
+   ↓
+6. Waits for service to stabilize
+   ↓
+7. ✅ Service restored to last known good state
+```
+
+**Features:**
+- ✅ **Zero manual intervention** - Happens automatically
+- ✅ **Fast recovery** - 3-5 minutes total
+- ✅ **Infinite loop prevention** - Won't rollback a rollback
+- ✅ **Safety checks** - Validates revisions before rolling back
+- ✅ **Notification** - GitHub workflow summary shows what happened
+
+**When it runs:**
+- Terraform apply fails
+- ECS service update fails
+- Any step in deployment workflow fails
+
+**When it doesn't run:**
+- No previous successful deployment exists (first deploy)
+- The failed workflow was already a rollback (prevents loops)
+- Deployment succeeds
+
+**Monitoring:**
+Check [GitHub Actions](../../.github/workflows/auto-rollback.yml) to see auto-rollback history.
+
+**Disabling auto-rollback:**
+If you need to disable it temporarily, disable the "Auto Rollback on Deployment Failure" workflow in GitHub Actions settings.
+
+---
+
+### Option 1: GitHub Actions Workflow (Manual)
 
 1. Navigate to [Actions tab](../../.github/workflows/rollback.yml) in GitHub
 2. Select "Rollback Deployment" workflow
@@ -129,6 +177,121 @@ cd /path/to/deplight-infra
 ```
 
 ## Detailed Procedures
+
+### 0. Automatic Rollback (Self-Healing) 🤖 🆕
+
+**When to use**: Always enabled - no action needed from you!
+
+**How it works technically:**
+
+The automatic rollback system consists of three components:
+
+#### Component 1: Deployment State Tracking (`deploy.yml`)
+
+Every successful deployment saves its state:
+```yaml
+deployment-state/
+├── last-successful-image-tag.txt  # e.g., "abc123d"
+├── environment.txt                 # "dev" or "prod"
+├── commit-sha.txt                  # Full commit SHA
+└── timestamp.txt                   # ISO 8601 timestamp
+```
+
+These artifacts are stored for 30 days and retrieved during rollback.
+
+#### Component 2: Failure Detection (`auto-rollback.yml`)
+
+Triggered by `workflow_run` event when "Deploy Service" completes:
+
+```yaml
+on:
+  workflow_run:
+    workflows: ["Deploy Service"]
+    types: [completed]
+```
+
+Checks:
+1. ✅ Was the deployment workflow conclusion `failure`?
+2. ✅ Is this NOT already a rollback workflow? (prevents loops)
+3. ✅ Does a previous successful deployment exist?
+
+If all checks pass → proceed to rollback
+
+#### Component 3: Automatic Execution
+
+**Step-by-step process:**
+
+1. **Fetch last successful deployment**
+   - Downloads artifact from last successful workflow run
+   - Extracts image tag (e.g., `abc123d`)
+
+2. **Find matching Task Definition**
+   - Lists recent Task Definition revisions (last 20)
+   - Searches for revision with matching image tag
+   - Falls back to `current_revision - 1` if not found
+
+3. **Safety checks**
+   - Ensures target revision < current revision (prevents rollback to same/newer)
+   - Verifies Task Definition exists in ECS
+
+4. **Execute rollback**
+   ```bash
+   aws ecs update-service \
+     --cluster delightful-deploy-cluster \
+     --service delightful-deploy-service \
+     --task-definition delightful-deploy:42
+   ```
+
+5. **Wait for stability**
+   ```bash
+   aws ecs wait services-stable \
+     --cluster delightful-deploy-cluster \
+     --services delightful-deploy-service
+   ```
+
+6. **Verify rollback**
+   - Checks current Task Definition revision
+   - Confirms it matches target revision
+
+**What happens after auto-rollback:**
+
+✅ **Success Case:**
+- GitHub workflow summary shows rollback details
+- Service is running previous stable version
+- You can investigate the failure, fix it, and re-deploy
+
+❌ **Failure Case (no previous deployment):**
+- Workflow creates notification summary
+- Manual intervention required
+- This only happens on very first deployment
+
+**Infinite Loop Prevention:**
+
+The system prevents rollback loops:
+```python
+if workflow_name contains "Rollback":
+    skip_auto_rollback()  # Don't rollback a rollback!
+```
+
+**Monitoring Auto-Rollback:**
+
+```bash
+# View recent auto-rollback runs
+gh run list --workflow=auto-rollback.yml
+
+# View specific auto-rollback details
+gh run view <run-id>
+```
+
+**Disabling Temporarily:**
+
+If you need to debug deployment failures without auto-rollback:
+1. Go to GitHub → Settings → Actions → Workflows
+2. Find "Auto Rollback on Deployment Failure"
+3. Click "Disable workflow"
+4. After debugging, re-enable it
+
+---
 
 ### 1. ECS Task Definition Rollback ⭐ (Most Reliable)
 
