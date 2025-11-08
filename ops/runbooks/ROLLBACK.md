@@ -16,20 +16,22 @@ This guide provides comprehensive instructions for rolling back deployments in t
 
 The deplight-platform supports multiple rollback strategies:
 
-1. **Terraform Rollback**: Redeploy a previous image tag by re-running Terraform
-2. **CodeDeploy Auto-Rollback**: Automatic rollback on deployment failure
-3. **Manual CodeDeploy Rollback**: Stop current deployment to trigger rollback
+1. **ECS Task Definition Rollback** ⭐ **Most Reliable**: Rollback to a specific Task Definition revision
+2. **Terraform Rollback**: Redeploy a previous image tag by re-running Terraform
+3. **CodeDeploy Auto-Rollback**: Automatic rollback on deployment failure
+4. **Manual CodeDeploy Rollback**: Stop current deployment to trigger rollback
 
 ## Rollback Methods
 
 ### Method Comparison
 
-| Method | Use Case | Speed | Complexity | Automated |
-|--------|----------|-------|------------|-----------|
-| **GitHub Actions Workflow** | Recommended for all rollbacks | ~5-10 min | Low | Yes |
-| **Terraform Script** | Manual rollback, local execution | ~5-10 min | Medium | Partial |
-| **CodeDeploy Auto** | Failed deployments | ~2-5 min | Low | Yes |
-| **CodeDeploy Manual** | Stop in-progress deployment | ~2-5 min | Low | Partial |
+| Method | Use Case | Speed | Complexity | Automated | Reliability |
+|--------|----------|-------|------------|-----------|-------------|
+| **ECS Task Definition** ⭐ | Most reliable, captures full task config | ~3-5 min | Low | Partial | ⭐⭐⭐⭐⭐ |
+| **GitHub Actions Workflow** | Recommended for all rollbacks | ~5-10 min | Low | Yes | ⭐⭐⭐⭐ |
+| **Terraform Script** | Manual rollback, local execution | ~5-10 min | Medium | Partial | ⭐⭐⭐⭐ |
+| **CodeDeploy Auto** | Failed deployments | ~2-5 min | Low | Yes | ⭐⭐⭐ |
+| **CodeDeploy Manual** | Stop in-progress deployment | ~2-5 min | Low | Partial | ⭐⭐⭐ |
 
 ## Prerequisites
 
@@ -97,7 +99,26 @@ cd /path/to/deplight-infra
 ./ops/scripts/rollback/rollback.sh prod abc123d
 ```
 
-### Option 3: CodeDeploy Rollback
+### Option 3: ECS Task Definition Rollback ⭐ (Most Reliable)
+
+```bash
+# Recommended: Rollback to a specific Task Definition revision
+./ops/scripts/rollback/ecs-taskdef-rollback.sh <environment> [revision]
+
+# Interactive mode (lists recent revisions)
+./ops/scripts/rollback/ecs-taskdef-rollback.sh prod
+
+# Direct rollback to revision 42
+./ops/scripts/rollback/ecs-taskdef-rollback.sh prod 42
+```
+
+**Why use this method?**
+- Captures complete task configuration (CPU, memory, env vars, etc.)
+- More reliable than image tag alone
+- Faster rollback (direct ECS API call)
+- No Terraform state changes
+
+### Option 4: CodeDeploy Rollback
 
 ```bash
 # For in-progress deployments
@@ -109,7 +130,74 @@ cd /path/to/deplight-infra
 
 ## Detailed Procedures
 
-### 1. Terraform Rollback via GitHub Actions
+### 1. ECS Task Definition Rollback ⭐ (Most Reliable)
+
+**When to use**: Fastest and most reliable rollback, recommended for production issues
+
+**Why this method?**
+- Rolls back entire task configuration, not just image
+- Includes CPU, memory, environment variables, logging config
+- Faster than Terraform (direct API call)
+- No risk of Terraform state issues
+
+**Steps**:
+
+1. **Find target Task Definition revision**:
+   ```bash
+   # List recent Task Definition revisions
+   aws ecs list-task-definitions \
+     --family-prefix delightful-deploy \
+     --sort DESC \
+     --max-items 10 \
+     --region ap-northeast-2
+
+   # Get details of specific revision
+   aws ecs describe-task-definition \
+     --task-definition delightful-deploy:42 \
+     --region ap-northeast-2
+   ```
+
+2. **Run rollback script** (Interactive Mode):
+   ```bash
+   ./ops/scripts/rollback/ecs-taskdef-rollback.sh prod
+   ```
+
+   The script will:
+   - Show recent Task Definition revisions with images and timestamps
+   - Prompt you to select a revision number
+   - Perform database migration safety checks
+   - Require `ROLLBACK-PROD` confirmation for production
+   - Update ECS service
+   - Wait for service to stabilize
+   - Verify rollback succeeded
+
+3. **Or direct rollback** (if you know the revision):
+   ```bash
+   ./ops/scripts/rollback/ecs-taskdef-rollback.sh prod 42
+   ```
+
+4. **Verify rollback**:
+   ```bash
+   # Check service status
+   aws ecs describe-services \
+     --cluster delightful-deploy-cluster \
+     --services delightful-deploy-service \
+     --region ap-northeast-2
+
+   # Verify Task Definition revision
+   aws ecs describe-services \
+     --cluster delightful-deploy-cluster \
+     --services delightful-deploy-service \
+     --region ap-northeast-2 \
+     --query 'services[0].taskDefinition'
+   ```
+
+5. **Monitor**:
+   - CloudWatch Logs: `/aws/ecs/delightful-deploy`
+   - ECS Service Events
+   - Application health checks
+
+### 2. Terraform Rollback via GitHub Actions
 
 **When to use**: Rollback to any previous version, most controlled approach
 
@@ -154,7 +242,7 @@ cd /path/to/deplight-infra
      --region ap-northeast-2
    ```
 
-### 2. Local Terraform Rollback
+### 3. Local Terraform Rollback
 
 **When to use**: When GitHub Actions is unavailable or you prefer local control
 
@@ -196,7 +284,7 @@ cd /path/to/deplight-infra
    terraform output
    ```
 
-### 3. CodeDeploy Auto-Rollback
+### 4. CodeDeploy Auto-Rollback
 
 **When to use**: Automatic rollback on deployment failure (already configured)
 
@@ -214,7 +302,7 @@ aws deploy get-deployment-group \
   --query 'deploymentGroupInfo.autoRollbackConfiguration'
 ```
 
-### 4. Manual CodeDeploy Rollback
+### 5. Manual CodeDeploy Rollback
 
 **When to use**: Stop an in-progress problematic deployment
 
@@ -366,23 +454,120 @@ aws iam list-attached-user-policies --user-name <your-username>
 
 ### Rollback Safety Checklist
 
-- [ ] Identified correct previous image tag
-- [ ] Verified image exists in ECR
-- [ ] Checked for database migrations (rollback may not be safe)
-- [ ] Notified team members
-- [ ] Reviewed Terraform plan carefully
-- [ ] Tested in non-production environment (if possible)
+#### Pre-Rollback Verification
+- [ ] Identified correct previous image tag or Task Definition revision
+- [ ] Verified image exists in ECR (or Task Definition exists)
+- [ ] **Verified database migrations have NOT been applied after target version** ⭐
+- [ ] Confirmed database schema is compatible with target version
+- [ ] RDS snapshot available (if needed)
+- [ ] down.sql migration scripts prepared (if applicable)
+- [ ] Notified team members and stakeholders
+
+#### Rollback Execution
+- [ ] Reviewed Terraform plan carefully (if using Terraform rollback)
+- [ ] Tested rollback in dev/staging environment first
+- [ ] Environment-specific confirmation completed:
+  - [ ] **Prod**: Typed `ROLLBACK-PROD` confirmation
+  - [ ] **Dev**: Typed `yes` confirmation
 - [ ] Have backup plan if rollback fails
-- [ ] Ready to monitor deployment
+
+#### Post-Rollback Verification
+- [ ] Terraform state drift check passed (exit code 0)
+- [ ] ECS task definition updated correctly
+- [ ] Container image tag matches expected version
+- [ ] Running task count matches desired count
+- [ ] Application health checks passing
+- [ ] Ready to monitor deployment for 15-30 minutes
 
 ## Emergency Contact
 
-In case of critical issues:
+In case of critical issues, follow this troubleshooting sequence:
 
-1. Check CloudWatch dashboards
-2. Review ECS service events
-3. Check CodeDeploy deployment logs
-4. Escalate to infrastructure team
+### 1️⃣ Check CloudWatch Alarms & Dashboards
+
+```bash
+# CloudWatch Dashboard URL
+https://console.aws.amazon.com/cloudwatch/home?region=ap-northeast-2#dashboards:
+
+# Check recent alarms
+aws cloudwatch describe-alarms \
+  --state-value ALARM \
+  --region ap-northeast-2
+```
+
+### 2️⃣ Review ECS Service Events
+
+```bash
+# ECS Service Events
+aws ecs describe-services \
+  --cluster delightful-deploy-cluster \
+  --services delightful-deploy-service \
+  --region ap-northeast-2 \
+  --query 'services[0].events[0:10]'
+
+# ECS Console URL
+https://console.aws.amazon.com/ecs/home?region=ap-northeast-2#/clusters/delightful-deploy-cluster/services/delightful-deploy-service
+```
+
+### 3️⃣ Check Application Logs
+
+**CloudWatch Log Groups:**
+- **ECS Container Logs**: `/aws/ecs/delightful-deploy`
+- **Lambda Logs**: `/aws/lambda/delightful-deploy-ai-analyzer`
+
+```bash
+# Tail recent ECS logs
+aws logs tail /aws/ecs/delightful-deploy \
+  --follow \
+  --region ap-northeast-2 \
+  --since 10m
+
+# CloudWatch Logs Console
+https://console.aws.amazon.com/cloudwatch/home?region=ap-northeast-2#logsV2:log-groups/log-group/$252Faws$252Fecs$252Fdelightful-deploy
+```
+
+### 4️⃣ Check CodeDeploy Deployment Logs
+
+**CodeDeploy Logs:**
+- **Deployment History**: CodeDeploy Console
+- **Agent Logs** (if using EC2): `/var/log/aws/codedeploy-agent/codedeploy-agent.log`
+
+```bash
+# List recent deployments
+aws deploy list-deployments \
+  --application-name deplight-prod-app \
+  --deployment-group-name prod-deployment-group \
+  --region ap-northeast-2
+
+# Get deployment details
+aws deploy get-deployment \
+  --deployment-id <deployment-id> \
+  --region ap-northeast-2
+
+# CodeDeploy Console
+https://console.aws.amazon.com/codesuite/codedeploy/applications
+```
+
+### 5️⃣ Verify Terraform State
+
+```bash
+# Check for drift
+cd infrastructure/environments/<env>
+terraform plan -detailed-exitcode
+
+# Exit codes:
+# 0 = no drift
+# 1 = error
+# 2 = drift detected
+```
+
+### 6️⃣ Escalate to Infrastructure Team
+
+If issues persist after following the above steps, escalate with:
+- Current symptoms and error messages
+- Steps already taken
+- Rollback status (completed/failed)
+- CloudWatch logs excerpt
 
 ## Additional Resources
 

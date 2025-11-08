@@ -69,6 +69,42 @@ if ! command -v aws &> /dev/null; then
     exit 1
 fi
 
+# Verify AWS credentials
+log_info "Verifying AWS credentials..."
+aws sts get-caller-identity > /dev/null 2>&1 || {
+    log_error "AWS credentials not configured or invalid"
+    exit 1
+}
+
+# Verify CodeDeploy Auto-Rollback Configuration
+log_info "Verifying CodeDeploy auto-rollback settings..."
+AUTO_ROLLBACK_CONFIG=$(aws deploy get-deployment-group \
+    --application-name "$APP_NAME" \
+    --deployment-group-name "$DEPLOYMENT_GROUP" \
+    --region ap-northeast-2 \
+    --query 'deploymentGroupInfo.autoRollbackConfiguration' \
+    --output json 2>/dev/null || echo "")
+
+if [ -n "$AUTO_ROLLBACK_CONFIG" ]; then
+    AUTO_ROLLBACK_ENABLED=$(echo "$AUTO_ROLLBACK_CONFIG" | jq -r '.enabled')
+    AUTO_ROLLBACK_EVENTS=$(echo "$AUTO_ROLLBACK_CONFIG" | jq -r '.events[]?' 2>/dev/null || echo "")
+
+    if [ "$AUTO_ROLLBACK_ENABLED" == "true" ]; then
+        log_info "✅ Auto-rollback is ENABLED"
+        if [ -n "$AUTO_ROLLBACK_EVENTS" ]; then
+            log_info "Rollback events: $AUTO_ROLLBACK_EVENTS"
+        fi
+    else
+        log_warn "⚠️  Auto-rollback is DISABLED"
+        log_warn "Manual intervention may be required on deployment failure"
+    fi
+else
+    log_warn "⚠️  Unable to verify auto-rollback configuration"
+    log_warn "Deployment group may not exist: $DEPLOYMENT_GROUP"
+fi
+
+echo ""
+
 # If no deployment ID is provided, find the latest deployment
 if [ -z "$DEPLOYMENT_ID" ]; then
     log_info "Finding latest deployment..."
