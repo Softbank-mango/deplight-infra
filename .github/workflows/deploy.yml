@@ -22,6 +22,8 @@ env:
   ECR_REGISTRY: 513348493870.dkr.ecr.ap-northeast-2.amazonaws.com
   ECR_REPOSITORY: delightful-deploy
   TF_DIR: infrastructure
+  ANALYZER_LAMBDA: delightful-deploy-ai-analyzer
+  ANALYZER_BUCKET: delightful-deploy-artifacts-513348493870
 
 permissions:
   id-token: write
@@ -45,6 +47,63 @@ jobs:
           repository: ${{ github.event.inputs.target_repository }}
           ref: ${{ github.event.inputs.target_branch || 'main' }}
           path: service
+
+      - name: Analyze service with AI
+        id: ai-analysis
+        run: |
+          echo "Running AI analyzer for ${{ github.event.inputs.target_repository }}..."
+          cd service
+
+          FILES=$(find . -type f -not -path "./.git/*" | head -100 | jq -R -s -c 'split("\n")[:-1]')
+          if [ -f README.md ]; then
+            README_CONTENT=$(head -100 README.md | jq -Rs .)
+          else
+            README_CONTENT='""'
+          fi
+
+          ANALYSIS_ID=$(echo -n "${{ github.event.inputs.target_repository }}-${{ github.sha }}" | md5sum | cut -d' ' -f1 | cut -c1-24)
+          echo "analysis_id=${ANALYSIS_ID}" >> $GITHUB_OUTPUT
+
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.event.inputs.target_repository }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg branch "${{ github.event.inputs.target_branch || 'main' }}" \
+            --argjson files "$FILES" \
+            --argjson readme "$README_CONTENT" \
+            --arg analysis_id "$ANALYSIS_ID" \
+            '{repository:$repo, commit_sha:$sha, branch:$branch, file_list:$files, readme_content:$readme, analysis_id:$analysis_id}')
+
+          aws lambda invoke \
+            --function-name "${{ env.ANALYZER_LAMBDA }}" \
+            --invocation-type Event \
+            --payload "$PAYLOAD" \
+            --cli-binary-format raw-in-base64-out \
+            --region "${{ env.AWS_REGION }}" \
+            /tmp/lambda_invoke_response.json
+
+          echo "Waiting for analyzer artifacts..."
+          MAX_WAIT=300
+          WAIT=0
+          while [ $WAIT -lt $MAX_WAIT ]; do
+            aws s3 ls "s3://${{ env.ANALYZER_BUCKET }}/analysis/${ANALYSIS_ID}/terraform_tfvars" >/dev/null 2>&1 && break
+            sleep 10
+            WAIT=$((WAIT+10))
+          done
+
+          if [ ! -f Dockerfile ]; then
+            aws s3 cp "s3://${{ env.ANALYZER_BUCKET }}/analysis/${ANALYSIS_ID}/dockerfile" Dockerfile >/dev/null 2>&1 || true
+          fi
+          aws s3 cp "s3://${{ env.ANALYZER_BUCKET }}/analysis/${ANALYSIS_ID}/terraform_tfvars" ../analyzer.tfvars >/dev/null 2>&1 || echo "{}" > ../analyzer.tfvars
+
+          PORT=$(grep -oP 'container_port\s*=\s*\K\d+' ../analyzer.tfvars || echo "")
+          CPU=$(grep -oP 'container_cpu\s*=\s*\K\d+' ../analyzer.tfvars || echo "")
+          MEMORY=$(grep -oP 'container_memory\s*=\s*\K\d+' ../analyzer.tfvars || echo "")
+
+          echo "port=${PORT}" >> $GITHUB_OUTPUT
+          echo "cpu=${CPU}" >> $GITHUB_OUTPUT
+          echo "memory=${MEMORY}" >> $GITHUB_OUTPUT
+
+          cd ..
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -108,6 +167,9 @@ jobs:
           TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
         run: |
+          if [ ! -f ../analyzer.tfvars ]; then
+            echo "{}" > ../analyzer.tfvars
+          fi
           echo "================================================"
           echo "Terraform Plan Configuration:"
           echo "  Environment: ${TARGET_ENV}"
@@ -118,6 +180,7 @@ jobs:
 
           terraform plan \
             -var-file=environments/${TARGET_ENV}.tfvars \
+            -var-file=../analyzer.tfvars \
             -var="container_image=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" \
             -out=tfplan
 
