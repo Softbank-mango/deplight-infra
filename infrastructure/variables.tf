@@ -180,7 +180,7 @@ variable "github_org" {
 variable "github_repo" {
   type        = string
   description = "GitHub repository name."
-  default     = "deplight-platform"
+  default     = "deplight-infra"
 }
 
 variable "github_oidc_role_name" {
