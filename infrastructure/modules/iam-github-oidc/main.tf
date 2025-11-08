@@ -101,6 +101,26 @@ data "aws_iam_policy_document" "base_permissions" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid = "AnalyzerInvocation"
+    actions = [
+      "lambda:InvokeFunction"
+    ]
+    resources = [var.analyzer_lambda_arn]
+  }
+
+  statement {
+    sid = "AnalyzerArtifacts"
+    actions = [
+      "s3:GetObject",
+      "s3:ListBucket"
+    ]
+    resources = [
+      "arn:aws:s3:::${var.analyzer_bucket}",
+      "arn:aws:s3:::${var.analyzer_bucket}/*"
+    ]
+  }
 }
 
 resource "aws_iam_policy" "base" {

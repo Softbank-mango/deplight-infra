@@ -200,3 +200,15 @@ variable "environment_name" {
   description = "Environment identifier used for cross-cutting resources (e.g., observability)."
   default     = "dev"
 }
+
+variable "analyzer_lambda_arn" {
+  type        = string
+  description = "ARN of the AI analyzer Lambda function."
+  default     = "arn:aws:lambda:ap-northeast-2:513348493870:function:delightful-deploy-ai-analyzer"
+}
+
+variable "analyzer_bucket" {
+  type        = string
+  description = "S3 bucket where analyzer artifacts are stored."
+  default     = "delightful-deploy-artifacts-513348493870"
+}

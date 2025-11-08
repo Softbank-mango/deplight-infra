@@ -30,3 +30,15 @@ variable "max_session_duration" {
   description = "Maximum session duration (in seconds) for the IAM role."
   default     = 3600
 }
+
+variable "analyzer_lambda_arn" {
+  type        = string
+  description = "ARN of the AI analyzer Lambda function."
+  default     = "arn:aws:lambda:ap-northeast-2:513348493870:function:delightful-deploy-ai-analyzer"
+}
+
+variable "analyzer_bucket" {
+  type        = string
+  description = "S3 bucket where analyzer artifacts are stored."
+  default     = "delightful-deploy-artifacts-513348493870"
+}

@@ -96,6 +96,8 @@ module "github_oidc" {
   github_repo      = var.github_repo
   role_name        = var.github_oidc_role_name
   allowed_subjects = var.github_allowed_subjects
+  analyzer_lambda_arn = var.analyzer_lambda_arn
+  analyzer_bucket     = var.analyzer_bucket
 }
 
 module "observability" {
