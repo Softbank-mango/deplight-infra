@@ -1,0 +1,225 @@
+name: Deploy Service
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (dev/prod)"
+        required: true
+        default: "dev"
+      target_repository:
+        description: "Service repository (owner/repo)"
+        required: true
+      target_branch:
+        description: "Branch in target repository"
+        required: false
+        default: "main"
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 513348493870.dkr.ecr.ap-northeast-2.amazonaws.com
+  ECR_REPOSITORY: delightful-deploy
+  TF_DIR: infrastructure
+
+permissions:
+  id-token: write
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.image-tag }}
+
+    steps:
+      - name: Checkout deployment repo
+        uses: actions/checkout@v4
+
+      - name: Checkout service repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.target_repository }}
+          ref: ${{ github.event.inputs.target_branch || 'main' }}
+          path: service
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          echo "================================================"
+          echo "Building Docker Image"
+          echo "  Commit SHA: ${GITHUB_SHA}"
+          echo "  Image Tag: ${IMAGE_TAG}"
+          echo "  Full Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "================================================"
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./service
+          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        id: build
+
+      - name: Push image
+        run: |
+          echo "Pushing image to ECR: $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.build.outputs.image-tag }}"
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.build.outputs.image-tag }}
+          echo "✅ Image pushed successfully"
+
+      - name: Set outputs
+        id: meta
+        run: |
+          echo "image-tag=${{ steps.build.outputs.image-tag }}" >> $GITHUB_OUTPUT
+
+  terraform-plan:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          echo "================================================"
+          echo "Terraform Plan Configuration:"
+          echo "  Environment: ${TARGET_ENV}"
+          echo "  Image Tag: ${IMAGE_TAG}"
+          echo "  Full Image URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          echo "  Commit SHA: ${{ github.sha }}"
+          echo "================================================"
+
+          terraform plan \
+            -var-file=environments/${TARGET_ENV}.tfvars \
+            -var="container_image=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" \
+            -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.TF_DIR }}/tfplan
+
+  terraform-apply:
+    needs: [build-and-push, terraform-plan]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+      url: https://${{ needs.build-and-push.outputs.image-tag }}.example.com
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          echo "================================================"
+          echo "Applying Terraform plan with image tag: ${IMAGE_TAG}"
+          echo "================================================"
+          terraform apply -auto-approve tfplan
+
+      - name: Display Terraform Outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "================================================"
+          echo "Deployment Summary:"
+          echo "================================================"
+          terraform output -json | jq -r '
+            "ECS Cluster: \(.ecs_cluster_name.value)",
+            "ECS Service: \(.ecs_service_name.value)",
+            "Task Definition: \(.ecs_task_definition.value)",
+            "Container Image: \(.container_image.value)",
+            "ALB DNS: \(.alb_dns_name.value)",
+            "CodeDeploy Group: \(.codedeploy_deployment_group.value)"
+          '
+          echo "================================================"
+
+      - name: Get ECS Task Definition
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          echo "Verifying ECS task definition update..."
+          CLUSTER_NAME="${{ env.ECR_REPOSITORY }}-cluster"
+          SERVICE_NAME="${{ env.ECR_REPOSITORY }}-service"
+
+          # Get the latest task definition ARN
+          TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster ${CLUSTER_NAME} \
+            --services ${SERVICE_NAME} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          echo "Current task definition: ${TASK_DEF_ARN}"
+
+          # Get the container image from the task definition
+          CONTAINER_IMAGE=$(aws ecs describe-task-definition \
+            --task-definition ${TASK_DEF_ARN} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.containerDefinitions[0].image' \
+            --output text)
+
+          echo "Container image in task definition: ${CONTAINER_IMAGE}"
+
+          # Verify the image tag matches
+          EXPECTED_IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          if [[ "${CONTAINER_IMAGE}" == "${EXPECTED_IMAGE}" ]]; then
+            echo "✅ SUCCESS: ECS task definition updated with expected image tag: ${IMAGE_TAG}"
+          else
+            echo "❌ ERROR: Image mismatch!"
+            echo "  Expected: ${EXPECTED_IMAGE}"
+            echo "  Got: ${CONTAINER_IMAGE}"
+            exit 1
+          fi

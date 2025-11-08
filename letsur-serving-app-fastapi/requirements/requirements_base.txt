@@ -1,0 +1,21 @@
+# BASE
+pydantic_settings==2.4
+fastapi[standard]==0.115.12 ; python_version >= "3.9" and python_version < "4.0"
+uvicorn[standard]==0.29.0 ; python_version >= "3.9" and python_version < "4.0"
+email-validator==2.1.1
+celery==5.4.0
+celery[sqs,s3]
+pillow==10.3.0
+fsspec==2024.6.0
+s3fs==2024.6.0
+python-magic==0.4.27
+pylibmagic==0.5.0
+
+pytz==2024.2
+
+# REDIS
+redis==5.0.8
+
+
+# Tracing
+langfuse==2.54.1

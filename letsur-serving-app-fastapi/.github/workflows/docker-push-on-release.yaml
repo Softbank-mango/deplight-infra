@@ -1,0 +1,37 @@
+name: "PRD: build push docker image"
+on:
+  release:
+    types: released
+jobs:
+  prd-ci:
+    runs-on: ubuntu-latest
+    environment: prd
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: set-project-name-to-env
+      run: echo LETSUR_ML_PROJECT_NAME=$(grep '^LETSUR_ML_PROJECT_NAME=' ".env.core" | awk -F'=' '{gsub(/"/, "", $2); print $2}') >> $GITHUB_ENV
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-northeast-2
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build the Docker image
+      uses: docker/build-push-action@v6
+      with:
+        tags: 441676301796.dkr.ecr.ap-northeast-2.amazonaws.com/letsur-serving-fastapi:${{ env.LETSUR_ML_PROJECT_NAME }}-${{ github.ref_name }}
+        push: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        secrets: |
+          "GIT_CREDENTIAL=https://git:${{secrets.ACTION_TOKEN}}@github.com"

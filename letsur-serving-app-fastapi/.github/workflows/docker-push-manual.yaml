@@ -1,0 +1,71 @@
+name: "DEV: Build docker image"
+on:
+  workflow_dispatch:
+jobs:
+  dev-ci:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+
+    - uses: actions/checkout@v3
+      with:
+        fetch-tags: "true"
+        fetch-depth: 0
+
+    - name: set-project-name-to-env
+      run: echo LETSUR_ML_PROJECT_NAME=$(grep '^LETSUR_ML_PROJECT_NAME=' ".env.core" | awk -F'=' '{gsub(/"/, "", $2); print $2}') >> $GITHUB_ENV
+
+    - name: Set image version from setuptools_scm
+      run: |
+        # setuptools_scm 설치
+        if ! python -c "import setuptools_scm" &>/dev/null; then
+          echo "[INFO] Installing setuptools_scm..."
+          pip install setuptools_scm || {
+            echo "[ERROR] Failed to install setuptools_scm" >&2
+            exit 1
+          }
+        fi
+
+        # Git 날짜와 커밋 해시
+        DATE=$(date +%Y%m%d)
+        GIT_SHA=$(git rev-parse --short HEAD || echo unknown)
+        FALLBACK_VERSION="v0.0.0-${DATE}-${GIT_SHA}"
+
+        # setuptools_scm 버전 시도
+        if RAW_VERSION=$(python -m setuptools_scm 2>/dev/null); then
+          SANITIZED_VERSION=$(echo "$RAW_VERSION" | sed 's/+/-/g')
+          IMAGE_VERSION="v${SANITIZED_VERSION#v}"
+        else
+          echo "[WARN] setuptools_scm failed. Using fallback version: ${FALLBACK_VERSION}" >&2
+          IMAGE_VERSION="$FALLBACK_VERSION"
+        fi
+
+        echo "IMAGE_VERSION=${IMAGE_VERSION}" >> $GITHUB_ENV
+
+    - name: Show image tag
+      run: |
+        echo "Build Image tag: 441676301796.dkr.ecr.ap-northeast-2.amazonaws.com/letsur-serving-fastapi:${LETSUR_ML_PROJECT_NAME}-${IMAGE_VERSION}"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-northeast-2
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build the Docker image
+      uses: docker/build-push-action@v6
+      with:
+        tags: 441676301796.dkr.ecr.ap-northeast-2.amazonaws.com/letsur-serving-fastapi:${{ env.LETSUR_ML_PROJECT_NAME }}-${{ env.IMAGE_VERSION }}
+        push: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        secrets: |
+          "GIT_CREDENTIAL=https://git:${{secrets.ACTION_TOKEN}}@github.com"

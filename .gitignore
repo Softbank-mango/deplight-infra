@@ -1,0 +1,39 @@
+# Node / frontend artifacts
+node_modules/
+.next/
+dist/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log
+.yarn/*
+
+# Python / backend virtualenv caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Terraform local state
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Generated analyzer outputs (retain structure via .gitkeep)
+generated/analyzer-artifacts/*
+!generated/analyzer-artifacts/.gitkeep
+
+# Ops artifacts
+ops/scripts/**/*.log
+
+# Coverage & testing
+coverage/
+.coverage
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

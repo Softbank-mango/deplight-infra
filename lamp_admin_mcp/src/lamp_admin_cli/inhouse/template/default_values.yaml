@@ -1,0 +1,72 @@
+apiServer:
+
+  deployment:
+    # ECR에 업로드된 FastAPI Image
+    image: ''
+
+    # 병렬로 띄울 FastAPI Container 개수, autoscale 사용시 의미 X
+    replicas: 1
+
+    # 단일 FastAPI Container에 할당할 자원 값 
+    resources: {}  
+      # requests:
+      #   cpu: "250m"
+      #   memory: "500Mi"
+      # limits:
+      #   cpu: "500m"
+      #   memory: "1000Mi"
+
+  # AutoScaling 기능
+  autoscaling:
+
+    # AutoScaling On/Off
+    useAutoscale: false
+
+    # ScaleToZero On/Off
+    scaleToZero: false
+
+    # scale in/out이 trigger되는 metric을 polling하는 주기
+    pollingInterval: 5
+
+    # scale in/out 동작 이후 다음 동작까지 최소 대기 시간 (second)
+    cooldownPeriod: 60
+
+    # scale in/out 이 trigger되는 metric 값 단위 : (최근 30s 내 Response 수)
+    # 예로 최근 30s 동안 Response 수가 64라면 Replica가 4가 된다.
+    # 멀티라인이 되니?
+    threshold: 16
+
+worker:
+  # 비동기 API 사용 On/Off
+  create: false
+  deployment:
+
+    # 병렬로 띄울 Celery Worker Container 개수, autoscale 사용시 의미 X
+    replicas: 1
+
+    # 단일 Celery Worker Container에 할당할 자원 값 
+    resources: {}  
+      # requests:
+      #   cpu: "500m"
+      #   memory: "1000Mi"
+      # limits:
+      #   cpu: "1000m"
+      #   memory: "2000Mi"
+
+  # AutoScaling 기능
+  autoscaling:
+
+    # AutoScaling On/Off
+    useAutoscale: false
+
+    # ScaleToZero On/Off
+    scaleToZero: false
+
+    # scale in/out이 trigger되는 metric을 polling하는 주기
+    pollingInterval: 5
+
+    # scale in/out 동작 이후 다음 동작까지 최소 대기 시간 (second)
+    cooldownPeriod: 300
+
+    # scale in/out 이 trigger되는 metric 값 단위 : (Queue에 쌓여 대기 중인 요청 개수) 예로 Queue에 20개의 요청이 쌓여있으면 replica는 4가 된다. 
+    threshold: 5

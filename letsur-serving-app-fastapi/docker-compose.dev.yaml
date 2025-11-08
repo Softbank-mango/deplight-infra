@@ -1,0 +1,78 @@
+# local stack 대신
+# aws 사용 버전.
+
+services:
+  fastapi:
+    build:
+      secrets:
+        - GIT_CREDENTIAL
+      context: .
+      args:
+       LETSUR_DEV: 1
+    image: "513348493870.dkr.ecr.ap-northeast-2.amazonaws.com/delightful-deploy:${LETSUR_ML_PROJECT_NAME:-app}-${IMAGE_VERSION:-v0.1.0}"
+    command:
+      - "--reload"
+    env_file:
+      - .env.core
+      - .env
+    environment:
+      - AWS_DEFAULT_PROFILE=${AWS_DEFAULT_PROFILE}
+      - LAMP_STAGE=dev
+      - LETSUR_REDIS_URL=redis://redis:6379
+    ports:
+      # - 8080:8080 # 포트 직접 binding 필요 시 주석 제거
+      - ${LETSUR_PORT:-8080}:8080
+    volumes:
+      - ./src:/code/src
+      # This is for aws credentials
+      - $HOME/.aws/:/root/.aws/:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 500M
+        reservations:
+          cpus: "0.2"
+          memory: 200M
+
+
+  celery-worker:
+    build:
+      context: .
+      args:
+       LETSUR_DEV: 1
+    image: "513348493870.dkr.ecr.ap-northeast-2.amazonaws.com/delightful-deploy:${LETSUR_ML_PROJECT_NAME:-app}-${IMAGE_VERSION:-v0.1.0}"
+    entrypoint:
+      bash -c "watchmedo auto-restart -d src/ -p '*.py' -R -- celery -A src._core.celery worker -l INFO"
+    env_file:
+      - .env.core
+      - .env
+    environment:
+      - AWS_DEFAULT_PROFILE=${AWS_DEFAULT_PROFILE}
+      - LAMP_STAGE=dev
+      - LETSUR_REDIS_URL=redis://redis:6379
+    volumes:
+      - ./src:/code/src
+      # This is for aws credentials
+      - $HOME/.aws/:/root/.aws/:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.2"
+          memory: 400M
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - 6379
+    environment:
+      - REDIS_PASSWORD=my-password
+      - REDIS_PORT=6379
+
+secrets:
+  GIT_CREDENTIAL:
+    environment: GIT_CREDENTIAL

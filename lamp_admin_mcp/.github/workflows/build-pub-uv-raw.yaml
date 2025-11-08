@@ -1,0 +1,44 @@
+name: "Build Package and publish with uv"
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  build-publish:
+    runs-on: arc-runner-set
+    steps:
+      - uses: actions/checkout@v4
+        with: 
+          fetch-tags: "true"
+          fetch-depth: 0
+
+
+      - name: Enable caching
+        uses: astral-sh/setup-uv@v5
+        with:
+            enable-cache: true
+      
+      - name: install requirements
+        run: | 
+            uv sync --locked --all-extras --dev
+        
+      - name: Test
+        run: |
+          uv run pytest -s -v tests
+      
+      - name: Build
+        run: |
+            uv build
+      
+      - name: Publish
+        run: |
+            uv publish \
+            --publish-url http://letsur-pypicloud-svc.letsur-pypicloud:8080/simple \
+            -u ${{github.actor}} \
+            -p "" \
+            --check-url http://letsur-pypicloud-svc.letsur-pypicloud:8080/simple
+

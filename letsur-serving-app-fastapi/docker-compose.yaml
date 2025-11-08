@@ -1,0 +1,55 @@
+services:
+  fastapi:
+    build:
+      secrets:
+        - GIT_CREDENTIAL
+      context: ./
+    image: "513348493870.dkr.ecr.ap-northeast-2.amazonaws.com/delightful-deploy:${LETSUR_ML_PROJECT_NAME:-app}-${IMAGE_VERSION:-v0.1.0}"
+    env_file:
+      - .env.core
+      - .env
+    environment:
+      - LETSUR_REDIS_URL=redis://redis:6379
+    ports:
+      - ${LETSUR_PORT:-8080}:8080
+    volumes:
+      - ./src:/code/src
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 500M
+        reservations:
+          cpus: "0.2"
+          memory: 200M
+  celery-worker:
+    build: ./
+    image: "513348493870.dkr.ecr.ap-northeast-2.amazonaws.com/delightful-deploy:${LETSUR_ML_PROJECT_NAME:-app}-${IMAGE_VERSION:-v0.1.0}"
+    entrypoint:
+      bash -c "celery -A src._core worker -l INFO"
+    env_file:
+      - .env.core
+      - .env
+    environment:
+      - LETSUR_REDIS_URL=redis://redis:6379
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.2"
+          memory: 400M
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - 6379
+    environment:
+      - REDIS_PASSWORD=my-password
+      - REDIS_PORT=6379
+
+secrets:
+  GIT_CREDENTIAL:
+    environment: GIT_CREDENTIAL

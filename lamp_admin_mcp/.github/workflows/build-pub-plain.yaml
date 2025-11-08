@@ -1,0 +1,48 @@
+name: "Build Package and publish with plain python"
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  build-publish:
+    runs-on: arc-runner-set
+    steps:
+      - uses: actions/checkout@v4
+        with: 
+          fetch-tags: "true"
+          fetch-depth: 0
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          cache: 'pip'
+          python-version-file: "pyproject.toml"
+      
+      - name: install requirements
+        run: | 
+          python -m pip install -U pip
+          pip install -r requirements/requirements_dev.txt
+        
+      - name: Test
+        run: |
+          python -m pytest -s -v tests
+      
+      - name: Build
+        run: |
+          pip install build 
+          python -m build .
+      
+      - name: Publish
+        run: |
+          pip install twine
+          python -m twine check dist/*
+          python -m twine upload dist/* \
+            --repository-url http://letsur-pypicloud-svc.letsur-pypicloud:8080/simple \
+            -u ${{github.actor}} \
+            -p "" \
+            --skip-existing
+

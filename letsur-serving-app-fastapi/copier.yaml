@@ -1,0 +1,88 @@
+LAMP_PROJECT_NAME:
+  type: str
+  help: The name of the project (in .env.core | deprecated )
+  default: letsur-serving-app
+LETSUR_ML_PROJECT_NAME:
+  type: str
+  help: The name of the ML project (in .env.core | LAMP_PROJECT_NAME 대신 쓰시면 감사합니다. )
+  default: letsur-serving-app
+
+
+_message_after_copy: |
+    Your project "{{ LETSUR_ML_PROJECT_NAME if LETSUR_ML_PROJECT_NAME else LAMP_PROJECT_NAME }}" has been created successfully!
+
+    Next steps:
+
+    1. 가상 환경 생성
+    2. 깃허브 레포지토리 등록
+    3. `pre-commit install`
+    3. 개발
+
+_message_after_update: |
+  Your project "{{ project_name }}" has been updated successfully!
+  In case there are any conflicts, please resolve them. Then,
+  you're done.
+
+  Next steps:
+  1. Confilct 해소
+  2. 프리커밋 훅 설치 `pre-commit install`
+  3. git add / commit / push
+
+
+_exclude:
+  # Global
+  - .vscode
+  - .mypy_cache
+  - poetry.lock
+  - .git
+  - copier.yaml
+  # Python
+  - __pycache__
+  - app.egg-info
+  - "*.pyc"
+  - .mypy_cache
+  - .coverage
+  - htmlcov
+  - poetry.lock
+  - .cache
+  - .venv
+  # Frontend
+  # Logs
+  - logs
+  - "*.log"
+  - npm-debug.log*
+  - yarn-debug.log*
+  - yarn-error.log*
+  - pnpm-debug.log*
+  - lerna-debug.log*
+  - node_modules
+  - dist
+  - dist-ssr
+  - "*.local"
+  # Editor directories and files
+  - .idea
+  - .DS_Store
+  - "*.suo"
+  - "*.ntvs*"
+  - "*.njsproj"
+  - "*.sln"
+  - "*.sw?"
+  # Project Dir
+  - docs/build/*
+  - docs/source/*
+  - "!docs/source/conf.py"
+  - "!docs/source/index.rst"
+
+
+_skip_if_exists:
+  - src/routers/*
+  - src/*.py
+  - .env*
+  - "!.env.core"
+  - requirements/requirements_app.txt
+
+_answers_file: .copier/.copier-answers.yml
+
+_tasks:
+  - ["{{ _copier_python }}", .copier/update_dotenv.py]
+  - ["{{ _copier_python }}", .copier/init_pyproject.py]
