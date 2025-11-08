@@ -26,30 +26,32 @@ interface RollbackButtonProps {
   environment: 'dev' | 'prod';
   currentImageTag?: string;
   userId: string;
-  apiEndpoint: string; // Lambda API Gateway endpoint
-  onSuccess?: (data: RollbackResponse) => void;
+  githubToken: string;
+  repoOwner: string;
+  repoName: string;
+  workflowFileName: string; // e.g. rollback.yml
+  workflowRef?: string; // branch or tag that contains the workflow (defaults to roll-back)
+  onSuccess?: (data: RollbackDispatchResult) => void;
   onError?: (error: Error) => void;
 }
 
-interface RollbackResponse {
-  status: string;
-  message: string;
-  data: {
-    audit_id: string;
-    workflow_run_id: string;
-    environment: string;
-    rollback_type: string;
-    image_tag: string;
-    estimated_duration: string;
-    monitor_url: string;
-  };
+interface RollbackDispatchResult {
+  status: 'success';
+  monitorUrl: string;
+  workflowDispatchEndpoint: string;
+  environment: string;
+  ref: string;
 }
 
 export const RollbackButton: React.FC<RollbackButtonProps> = ({
   environment,
   currentImageTag,
   userId,
-  apiEndpoint,
+  githubToken,
+  repoOwner,
+  repoName,
+  workflowFileName,
+  workflowRef,
   onSuccess,
   onError,
 }) => {
@@ -79,17 +81,30 @@ export const RollbackButton: React.FC<RollbackButtonProps> = ({
     setLoading(true);
 
     try {
-      const response = await fetch(apiEndpoint, {
+      const workflowDispatchEndpoint = `https://api.github.com/repos/${repoOwner}/${repoName}/actions/workflows/${workflowFileName}/dispatches`;
+      const dispatchRef = workflowRef ?? 'roll-back';
+
+      const inputs: Record<string, string> = {
+        environment,
+        reason: `Manual rollback via UI by ${userId}`,
+        triggered_by: userId,
+      };
+
+      if (currentImageTag) {
+        inputs.image_tag = currentImageTag;
+      }
+
+      const response = await fetch(workflowDispatchEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${githubToken}`,
+          'X-GitHub-Api-Version': '2022-11-28',
         },
         body: JSON.stringify({
-          environment,
-          rollback_type: 'terraform', // or 'ecs-taskdef'
-          user_id: userId,
-          reason: `Manual rollback via UI by ${userId}`,
-          // image_tag는 생략하면 자동으로 마지막 성공 버전 사용
+          ref: dispatchRef,
+          inputs,
         }),
       });
 
@@ -97,27 +112,29 @@ export const RollbackButton: React.FC<RollbackButtonProps> = ({
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data: RollbackResponse = await response.json();
+      const monitorUrl = `https://github.com/${repoOwner}/${repoName}/actions/workflows/${workflowFileName}`;
 
-      if (data.status === 'success') {
-        setSnackbar({
-          open: true,
-          message: `✅ 롤백이 시작되었습니다! (예상 소요 시간: ${data.data.estimated_duration})`,
-          severity: 'success',
-        });
+      setSnackbar({
+        open: true,
+        message: '✅ 롤백 워크플로우 실행 요청을 GitHub에 전달했습니다.',
+        severity: 'success',
+      });
 
-        if (onSuccess) {
-          onSuccess(data);
-        }
+      const result: RollbackDispatchResult = {
+        status: 'success',
+        monitorUrl,
+        workflowDispatchEndpoint,
+        environment,
+        ref: dispatchRef,
+      };
 
-        // 진행 상황 모니터링 페이지로 리다이렉트하거나
-        // 모니터링 컴포넌트 표시
-        setTimeout(() => {
-          window.open(data.data.monitor_url, '_blank');
-        }, 2000);
-      } else {
-        throw new Error(data.message || 'Rollback failed');
+      if (onSuccess) {
+        onSuccess(result);
       }
+
+      setTimeout(() => {
+        window.open(monitorUrl, '_blank');
+      }, 2000);
     } catch (error) {
       console.error('Rollback error:', error);
 
@@ -256,7 +273,10 @@ export const ExampleUsage = () => {
         environment="prod"
         currentImageTag="abc123d"
         userId="user@example.com"
-        apiEndpoint="https://your-api-gateway-url.amazonaws.com/rollback"
+        githubToken="ghp_exampletoken" // ⚠️ 실제 프로덕션에서는 안전한 저장소를 사용하세요
+        repoOwner="Softbank-mango"
+        repoName="deplight-infra"
+        workflowFileName="rollback.yml"
         onSuccess={(data) => {
           console.log('Rollback initiated:', data);
           // 추가 로직: 대시보드 업데이트, 알림 등
@@ -272,7 +292,10 @@ export const ExampleUsage = () => {
         environment="dev"
         currentImageTag="xyz789a"
         userId="user@example.com"
-        apiEndpoint="https://your-api-gateway-url.amazonaws.com/rollback"
+        githubToken="ghp_exampletoken"
+        repoOwner="Softbank-mango"
+        repoName="deplight-infra"
+        workflowFileName="rollback.yml"
       />
     </div>
   );

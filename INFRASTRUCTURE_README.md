@@ -142,25 +142,27 @@ You wake up at 9:00 AM → Check logs → Fix issue → Re-deploy
 
 **Dashboard에서 버튼 클릭 → 확인 → 롤백**
 
+> ℹ️ **한국어 설명:** 현재 UI는 AWS Lambda를 거치지 않고 GitHub Actions `workflow_dispatch` API를 직접 호출하여 롤백 워크플로우를 트리거합니다. 기존 Lambda 예시는 정리되었으며 React 기반 버튼 컴포넌트만 유지됩니다. 기본 호출 브랜치는 `roll-back`이며, 다른 브랜치/태그를 사용하려면 UI에서 `workflowRef`를 명시하세요.
+
 ```tsx
 <RollbackButton
   environment="prod"
   userId="user@example.com"
-  apiEndpoint="https://api.example.com/rollback"
+  githubToken="ghp_xxx" // ⚠️ 실제 서비스에서는 안전한 저장 방식을 사용하세요.
+  repoOwner="Softbank-mango"
+  repoName="deplight-infra"
+  workflowFileName="rollback.yml"
 />
 ```
 
 **플로우:**
 1. 사용자가 UI에서 "롤백" 버튼 클릭
 2. 확인 다이얼로그 표시 (환경, 버전, 영향 설명)
-3. 확인 시 Lambda 함수 호출
-4. GitHub Actions 롤백 워크플로우 트리거
-5. 3-5분 후 롤백 완료
+3. GitHub Actions `workflow_dispatch` API 직접 호출
+4. 워크플로우 실행 상태를 GitHub Actions 페이지에서 즉시 모니터링
 
 **제공 컴포넌트:**
 - React + Material-UI (`apps/ui-samples/RollbackButton.tsx`)
-- Vue 3 + Vuetify (`apps/ui-samples/RollbackButton.vue`)
-- Lambda API (`lambda/rollback-trigger/`)
 
 ### **3. 📜 Multiple Rollback Methods**
 
@@ -187,7 +189,6 @@ You wake up at 9:00 AM → Check logs → Fix issue → Re-deploy
 - ✅ Running task count validation
 
 **Audit Trail:**
-- ✅ DynamoDB audit log (who, when, what, why)
 - ✅ GitHub Actions workflow history
 - ✅ CloudWatch logs
 
@@ -195,7 +196,7 @@ You wake up at 9:00 AM → Check logs → Fix issue → Re-deploy
 
 **Monitoring Stack:**
 - CloudWatch Dashboards (metrics, alarms)
-- CloudWatch Logs (ECS, Lambda, CodeDeploy)
+- CloudWatch Logs (ECS, CodeDeploy)
 - X-Ray (distributed tracing)
 - GitHub Actions (deployment history)
 
@@ -204,11 +205,8 @@ You wake up at 9:00 AM → Check logs → Fix issue → Re-deploy
 # ECS Container Logs
 /aws/ecs/delightful-deploy
 
-# Lambda Logs
-/aws/lambda/rollback-trigger
-
-# Audit Logs
-DynamoDB: rollback-audit-log table
+# GitHub Actions
+https://github.com/Softbank-mango/deplight-infra/actions
 ```
 
 ---
@@ -325,9 +323,7 @@ if workflow_name.contains("Rollback"):
 ### **2. UI-Triggered Rollback** 🎨
 
 **Files**:
-- Lambda: `lambda/rollback-trigger/lambda_function.py`
 - UI (React): `apps/ui-samples/RollbackButton.tsx`
-- UI (Vue): `apps/ui-samples/RollbackButton.vue`
 
 **Architecture:**
 ```
@@ -335,34 +331,23 @@ User clicks [롤백] button
    ↓
 Confirmation dialog
    ↓
-POST /rollback → Lambda
+GitHub Actions REST API (`workflow_dispatch`)
    ↓
-Lambda triggers GitHub Actions workflow
-   ↓
-Rollback executed
+Rollback workflow queued
 ```
-
-**Lambda Function:**
-- Validates user request
-- Retrieves last successful image tag
-- Calls GitHub API (`workflow_dispatch`)
-- Records audit log to DynamoDB
-- Returns rollback status
 
 **UI Component:**
 - Environment-specific warnings (Dev = yellow, Prod = red)
 - Detailed confirmation dialog
 - Progress indicators
-- Auto-opens GitHub Actions monitor
+- Auto-opens GitHub Actions monitor page
 
-**Deployment:**
-```bash
-cd lambda/rollback-trigger
-terraform apply -var="github_token=ghp_xxx"
-# Output: API Gateway endpoint
-```
+**구성 방법:**
+1. GitHub Personal Access Token(Fine-grained) 생성 → `workflow` 권한 부여
+2. 토큰을 BFF/사내 API 등에 안전하게 저장 후 UI에 주입
+3. `RollbackButton`에 저장소 정보/워크플로우 파일명/브랜치를 전달
 
-**Cost**: < $0.01/month (100 rollbacks)
+**Cost**: $0 (GitHub Actions API 호출만 사용)
 
 ### **3. ECS Task Definition Rollback** ⭐
 
@@ -680,7 +665,7 @@ If downtime costs $1000/hour:
 
 ### **Compliance**
 
-- ✅ Audit trail (DynamoDB + GitHub Actions)
+- ✅ Audit trail (GitHub Actions run history)
 - ✅ Immutable infrastructure (Terraform)
 - ✅ Version control (Git)
 - ✅ Automated testing (CI/CD)
@@ -709,9 +694,6 @@ https://console.aws.amazon.com/cloudwatch/home?region=ap-northeast-2#dashboards:
 # ECS Container Logs
 aws logs tail /aws/ecs/delightful-deploy --follow
 
-# Lambda Rollback Logs
-aws logs tail /aws/lambda/rollback-trigger --follow
-
 # Query logs
 aws logs filter-log-events \
   --log-group-name /aws/ecs/delightful-deploy \
@@ -736,7 +718,6 @@ aws logs filter-log-events \
 | [ROLLBACK.md](./ops/runbooks/ROLLBACK.md) | Complete rollback guide |
 | [deployment_system.md](./deployment_system.md) | Deployment architecture |
 | [UI Samples README](./apps/ui-samples/README.md) | UI component guide |
-| [Lambda README](./lambda/rollback-trigger/README.md) | Lambda function guide |
 
 ### **Workflows**
 
