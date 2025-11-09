@@ -21,7 +21,7 @@ env:
   ECR_REPOSITORY: delightful-deploy
   TF_DIR: infrastructure
   ANALYZER_LAMBDA: delightful-deploy-ai-analyzer
-  ANALYZER_BUCKET: delightful-deploy-artifacts-513348493870
+  ANALYZER_BUCKET: deplight-platform-ai-analyze
 
 permissions:
   id-token: write

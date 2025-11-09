@@ -40,7 +40,7 @@ variable "analyzer_lambda_arn" {
 variable "analyzer_bucket" {
   type        = string
   description = "S3 bucket where analyzer artifacts are stored."
-  default     = "delightful-deploy-artifacts-513348493870"
+  default     = "deplight-platform-ai-analyze"
 }
 
 variable "state_bucket" {
