@@ -125,3 +125,27 @@ graph TD
   ECS --> XR[X-Ray Sampling]
   ALB --> CW
 ```
+
+## VPC + Subnets
+
+```mermaid
+graph TD
+  subgraph VPC["VPC 10.20.0.0/16"]
+    subgraph AZA["Subnet 10.20.0.0/20"]
+      ALB_A["ALB Node (AZ-a)"]
+      ECS_A["Fargate Task (AZ-a)"]
+    end
+    subgraph AZC["Subnet 10.20.16.0/20"]
+      ALB_C["ALB Node (AZ-c)"]
+      ECS_C["Fargate Task (AZ-c)"]
+    end
+    IGW["Internet Gateway"]
+  end
+  ALB_A --> ECS_A
+  ALB_C --> ECS_C
+  ALB_A <--> ALB_C
+  ECS_A -.-> XRay["X-Ray Daemon"]
+  ECS_C -.-> XRay
+  ALB_A --> IGW
+  ALB_C --> IGW
+```
